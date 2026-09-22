@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+dist/
+
+# env
+.env
+.env.example
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uploads
+uploads/*
+!uploads/.gitkeep
+
+# Prisma
+prisma/migrations/
+
+# IDE
+.vscode/
+.idea/

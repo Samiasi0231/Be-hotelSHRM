@@ -1,0 +1,463 @@
+// prisma/schema.prisma — FULL REPLACEMENT
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url     = env("DATABASE_URL")
+}
+
+// ===== ENUMS =====
+
+enum Role {
+  SUPER_ADMIN
+  HOTEL_DIRECTOR
+  ADMIN
+  ADMIN_HR
+  STAFF
+}
+
+enum SubscriptionPlan {
+  SMALL
+  LARGE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  EXPIRED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  TIMEOUT
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  PAYSTACK
+  FLUTTERWAVE
+  MANUAL
+}
+
+enum PaymentMethod {
+  ONLINE
+  CASH
+  POS
+  BANK_TRANSFER
+}
+
+enum ManualPaymentStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum RoomStatus {
+  AVAILABLE
+  OCCUPIED
+  MAINTENANCE
+  RESERVED
+}
+
+enum AttendanceType {
+  CLOCK_IN
+  CLOCK_OUT
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  PAYMENT
+  BOOKING
+  INVITE
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+// ===== MODELS =====
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  password     String
+  firstName    String
+  lastName     String
+  phone        String?
+  avatar       String?
+  role         Role     @default(STAFF)
+  isActive     Boolean  @default(true)
+  refreshToken String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  hotel             Hotel?       @relation("HotelDirector")
+  staffOf           Staff?
+  auditLogs         AuditLog[]
+  bookings          Booking[]    @relation("GuestBookings")
+  attendance        Attendance[]
+  cancelledBookings Booking[]    @relation("BookingCancelledBy")
+  approvedPayments  Payment[]    @relation("PaymentApprovedBy")
+  recordedPayments  Payment[]    @relation("PaymentRecordedBy")
+  invitesSent       Invite[]     @relation("InvitesSent")
+  invite            Invite?      @relation("InviteForUser")
+
+  @@map("users")
+}
+
+
+  model PlatformSettings {
+    id        String   @id @default(uuid())
+    key       String   @unique
+    value     String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+ 
+    @@map("platform_settings")
+  }
+
+model Hotel {
+  id                 String             @id @default(uuid())
+  name               String
+  slug               String?            @unique
+  onboardingStep     Int                @default(0)
+  isOnboarded        Boolean            @default(false)
+  tagline            String?
+  amenities          String[]           @default([])
+  policies           Json?
+  description        String?
+  address            String
+  city               String
+  state              String
+  country            String
+  phone              String
+  email              String
+  website            String?
+  logo               String?
+  coverImage         String?
+  starRating         Int                @default(3)
+  isActive           Boolean            @default(true)
+  directorId         String             @unique
+  subscriptionPlan   SubscriptionPlan   @default(SMALL)
+  subscriptionStatus SubscriptionStatus @default(INACTIVE)
+  subscriptionExpiry DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  director  User       @relation("HotelDirector", fields: [directorId], references: [id])
+  rooms     Room[]
+  staff     Staff[]
+  bookings  Booking[]
+  payments  Payment[]
+  auditLogs AuditLog[]
+
+  latitude           Decimal?  @db.Decimal(10, 7)
+  longitude          Decimal?  @db.Decimal(10, 7)
+  attendanceRadiusM  Int       @default(100)
+  attendanceGeofenceEnabled Boolean   @default(true)
+  attendanceGeofenceType    String    @default("CIRCLE") 
+  attendanceGeofencePoints  Json?  
+  shiftTypes ShiftType[]
+  rosters    Roster[]
+  rosterColumns RosterColumn[]
+  @@map("hotels")
+}
+
+model Room {
+  id            String     @id @default(uuid())
+  hotelId       String
+  roomNumber    String
+  roomType      String
+  description   String?
+  pricePerNight Decimal    @db.Decimal(10, 2)
+  capacity      Int        @default(2)
+  floor         Int?
+  status        RoomStatus @default(AVAILABLE)
+  amenities     String[]
+  images        String[]
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  hotel    Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@unique([hotelId, roomNumber])
+  @@map("rooms")
+}
+
+model Booking {
+  id               String        @id @default(uuid())
+  bookingRef       String        @unique
+  hotelId          String
+  roomId           String
+  guestId          String?
+  guestName        String
+  guestEmail       String
+  guestPhone       String
+  checkIn          DateTime
+  checkOut         DateTime
+  nights           Int
+  adults           Int           @default(1)
+  children         Int           @default(0)
+  totalAmount      Decimal       @db.Decimal(10, 2)
+  status           BookingStatus @default(PENDING)
+  specialRequests  String?
+  timeoutAt        DateTime?
+  confirmedAt      DateTime?
+  checkedInAt      DateTime?
+  checkedOutAt     DateTime?
+  cancelledAt      DateTime?
+  cancelReason     String?
+  cancelledByUserId String?
+  cancelType       String?
+  refundAmount     Decimal?      @db.Decimal(10, 2)
+  checkedInById    String?
+  checkedOutById   String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  hotel           Hotel    @relation(fields: [hotelId], references: [id])
+  room            Room     @relation(fields: [roomId], references: [id])
+  guest           User?    @relation("GuestBookings", fields: [guestId], references: [id])
+  payments        Payment[]
+  checkedInBy     Staff?   @relation("CheckedInBy",  fields: [checkedInById],  references: [id])
+  checkedOutBy    Staff?   @relation("CheckedOutBy", fields: [checkedOutById], references: [id])
+  cancelledByUser User?    @relation("BookingCancelledBy", fields: [cancelledByUserId], references: [id])
+
+  @@map("bookings")
+}
+
+model Payment {
+  id               String               @id @default(uuid())
+  bookingId        String
+  hotelId          String
+  amount           Decimal              @db.Decimal(10, 2)
+  currency         String               @default("NGN")
+  provider         PaymentProvider
+  providerRef      String?
+  providerData     Json?
+  status           PaymentStatus        @default(PENDING)
+  paidAt           DateTime?
+  paymentMethod    PaymentMethod        @default(ONLINE)
+  isManual         Boolean              @default(false)
+  manualStatus     ManualPaymentStatus?
+  recordedByUserId String?
+  recordedAt       DateTime?
+  approvedByUserId String?
+  approvedAt       DateTime?
+  approvalNote     String?
+  rejectionReason  String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  booking        Booking @relation(fields: [bookingId], references: [id])
+  hotel          Hotel   @relation(fields: [hotelId], references: [id])
+  recordedByUser User?   @relation("PaymentRecordedBy", fields: [recordedByUserId], references: [id])
+  approvedByUser User?   @relation("PaymentApprovedBy", fields: [approvedByUserId], references: [id])
+
+  @@map("payments")
+}
+
+model Staff {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  hotelId    String
+  employeeId String
+  department String
+  position   String
+  gender     Gender?
+  salary     Decimal? @db.Decimal(10, 2)
+  startDate  DateTime @default(now())
+  managerId  String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  checkInsPerformed  Booking[] @relation("CheckedInBy")
+  checkOutsPerformed Booking[] @relation("CheckedOutBy")
+
+  user       User         @relation(fields: [userId], references: [id])
+  hotel      Hotel        @relation(fields: [hotelId], references: [id])
+  attendance Attendance[]
+  rosterEntries RosterEntry[]
+  rosterCellValues  RosterCellValue[] 
+  rosterOrder      Int     @default(0)
+  hiddenFromRoster Boolean @default(false)
+
+  @@unique([hotelId, employeeId])
+  @@map("staff")
+}
+
+model Attendance {
+  id        String         @id @default(uuid())
+  staffId   String
+  userId    String
+  type      AttendanceType
+  timestamp DateTime       @default(now())
+  note      String?
+  ipAddress String?
+  createdAt DateTime       @default(now())
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+
+  staff Staff @relation(fields: [staffId], references: [id])
+  user  User  @relation(fields: [userId], references: [id])
+
+  @@map("attendance")
+}
+
+model AuditLog {
+  id        String      @id @default(uuid())
+  userId    String?
+  hotelId   String?
+  action    AuditAction
+  entity    String
+  entityId  String?
+  oldValues Json?
+  newValues Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime    @default(now())
+
+  user  User?  @relation(fields: [userId], references: [id])
+  hotel Hotel? @relation(fields: [hotelId], references: [id])
+
+  @@map("audit_logs")
+}
+
+model Invite {
+  id          String       @id @default(uuid())
+  token       String       @unique
+
+  userId      String       @unique
+  user        User         @relation("InviteForUser", fields: [userId], references: [id])
+
+  invitedById String
+  invitedBy   User         @relation("InvitesSent", fields: [invitedById], references: [id])
+
+  status      InviteStatus @default(PENDING)
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([token])
+  @@map("invites")
+}
+
+
+enum RosterStatus {
+  DRAFT
+  PUBLISHED
+  LOCKED
+}
+
+model ShiftType {
+  id        String   @id @default(uuid())
+  hotelId   String
+  name      String   // "Morning", "Night", "Off", "Leave"
+  code      String   // short label for the cell, e.g. "M", "N", "OFF"
+  startTime String?  // "07:00" — optional, "Off"/"Leave" types have none
+  endTime   String?
+  color     String   @default("#2563eb") // hex, for the cell background
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  hotel     Hotel    @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  entries   RosterEntry[]
+
+  @@unique([hotelId, code])
+  @@map("shift_types")
+}
+
+model Roster {
+  id          String       @id @default(uuid())
+  hotelId     String
+  weekStart   DateTime     // Monday of the week this roster covers
+  status      RosterStatus @default(DRAFT)
+  createdById String
+  publishedAt DateTime?
+  publishedById String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  hotel       Hotel        @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  entries     RosterEntry[]
+  cellValues RosterCellValue[]
+  @@unique([hotelId, weekStart])
+  @@map("rosters")
+}
+
+model RosterEntry {
+  id            String     @id @default(uuid())
+  rosterId      String
+  staffId       String
+  date          DateTime   // the specific day this cell represents
+  shiftTypeId   String?    // null = unassigned/blank cell
+  note          String?
+  updatedById   String
+  updatedAt     DateTime   @updatedAt
+  createdAt     DateTime   @default(now())
+  roster        Roster     @relation(fields: [rosterId], references: [id], onDelete: Cascade)
+  staff         Staff      @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  shiftType     ShiftType? @relation(fields: [shiftTypeId], references: [id])
+
+  @@unique([rosterId, staffId, date])
+  @@map("roster_entries")
+}
+
+model RosterColumn {
+  id        String   @id @default(uuid())
+  hotelId   String
+  label     String   // "Notes", "Overtime Hours"
+  type      String   @default("TEXT") // "TEXT" | "NUMBER"
+  order     Int       @default(0)
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  hotel     Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  values    RosterCellValue[]
+
+  @@map("roster_columns")
+}
+
+model RosterCellValue {
+  id         String       @id @default(uuid())
+  rosterId   String
+  staffId    String
+  columnId   String
+  value      String?
+  updatedById String
+  updatedAt  DateTime     @updatedAt
+  roster     Roster       @relation(fields: [rosterId], references: [id], onDelete: Cascade)
+  staff      Staff        @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  column     RosterColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@unique([rosterId, staffId, columnId])
+  @@map("roster_cell_values")
+}
