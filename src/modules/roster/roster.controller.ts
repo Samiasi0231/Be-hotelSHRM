@@ -101,9 +101,9 @@ export class RosterController {
   getMyWeek(
     @Param('hotelId') hotelId: string,
     @Query('weekStart') weekStart: string,
-    @Query('staffId') staffId: string,
+    @CurrentUser('sub') userId: string,
   ) {
-    return this.rosterService.getMyWeek(hotelId, weekStart, staffId);
+    return this.rosterService.getMyWeek(hotelId, weekStart, userId);
   }
 
   // ── Cell edits — Director/Admin only ───────────────────────────────────

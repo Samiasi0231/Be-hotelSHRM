@@ -1,5 +1,3 @@
-// src/modules/roster/roster.service.ts — FULL REPLACEMENT
-
 import { Injectable, NotFoundException,ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditLogService } from '../audit-log/audit-log.service';
@@ -95,25 +93,63 @@ export class RosterService {
     return roster;
   }
 
-  async getMyWeek(hotelId: string, weekStartInput: string, staffId: string) {
-    const weekStart = this.normalizeWeekStart(new Date(weekStartInput));
+ async getMyWeek(
+  hotelId: string,
+  weekStartInput: string,
+  userId: string,
+) {
+  const weekStart = this.normalizeWeekStart(new Date(weekStartInput));
 
-    const roster = await this.prisma.roster.findUnique({
-      where: { hotelId_weekStart: { hotelId, weekStart } },
-    });
+  // Find the staff profile belonging to the logged-in user
+  const staff = await this.prisma.staff.findFirst({
+    where: {
+      userId,
+      hotelId,
+    },
+  });
 
-    if (!roster || roster.status === RosterStatus.DRAFT) {
-      return { status: RosterStatus.DRAFT, weekStart, entries: [] };
-    }
-
-    const entries = await this.prisma.rosterEntry.findMany({
-      where: { rosterId: roster.id, staffId },
-      include: { shiftType: true },
-      orderBy: { date: 'asc' },
-    });
-
-    return { status: roster.status, weekStart, entries };
+  if (!staff) {
+    throw new NotFoundException(
+      'Staff profile not found for this hotel',
+    );
   }
+
+  const roster = await this.prisma.roster.findUnique({
+    where: {
+      hotelId_weekStart: {
+        hotelId,
+        weekStart,
+      },
+    },
+  });
+
+  if (!roster || roster.status === RosterStatus.DRAFT) {
+    return {
+      status: RosterStatus.DRAFT,
+      weekStart,
+      entries: [],
+    };
+  }
+
+  const entries = await this.prisma.rosterEntry.findMany({
+    where: {
+      rosterId: roster.id,
+      staffId: staff.id,
+    },
+    include: {
+      shiftType: true,
+    },
+    orderBy: {
+      date: 'asc',
+    },
+  });
+
+  return {
+    status: roster.status,
+    weekStart,
+    entries,
+  };
+}
 
   private async assertEditable(rosterId: string) {
     const roster = await this.prisma.roster.findUnique({ where: { id: rosterId } });
