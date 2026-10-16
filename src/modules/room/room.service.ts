@@ -5,6 +5,8 @@
 //   - getBookedDateRanges(): powers frontend date-picker blocking so User B
 //     can't pick dates already held/confirmed for User A.
 //   - MAINTENANCE is treated as a manual override — sync never clobbers it.
+//   - create/update/delete now write to the audit log — previously room
+//     changes were completely invisible in /audit-logs.
 
 import {
   Injectable,
@@ -13,6 +15,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CloudinaryService } from '../../cloudinary/cloudinary.service';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { CreateRoomDto } from './dto/create-room.dto';
 import { UpdateRoomDto } from './dto/update-room.dto';
 import { CheckAvailabilityDto } from './dto/check-availability.dto';
@@ -20,23 +23,41 @@ import {
   paginate,
   getPaginationParams,
 } from '../../common/helpers/pagination.helper';
-import { RoomStatus } from '@prisma/client';
+import { RoomStatus, AuditAction } from '@prisma/client';
 
 @Injectable()
 export class RoomService {
   constructor(
     private prisma: PrismaService,
     private cloudinary: CloudinaryService,
+    private auditLog: AuditLogService,
   ) {}
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  async create(hotelId: string, dto: CreateRoomDto) {
+  async create(hotelId: string, dto: CreateRoomDto, actorUserId?: string) {
     const exists = await this.prisma.room.findUnique({
       where: { hotelId_roomNumber: { hotelId, roomNumber: dto.roomNumber } },
     });
     if (exists) throw new ConflictException('Room number already exists in this hotel');
-    return this.prisma.room.create({ data: { ...dto, hotelId } });
+
+    const room = await this.prisma.room.create({ data: { ...dto, hotelId } });
+
+    await this.auditLog.create({
+      userId: actorUserId,
+      hotelId,
+      action: AuditAction.CREATE,
+      entity: 'Room',
+      entityId: room.id,
+      newValues: {
+        roomNumber: room.roomNumber,
+        roomType: room.roomType,
+        pricePerNight: Number(room.pricePerNight),
+        status: room.status,
+      },
+    }).catch(() => {});
+
+    return room;
   }
 
   async findAll(
@@ -67,14 +88,34 @@ export class RoomService {
     return room;
   }
 
-  async update(id: string, dto: UpdateRoomDto) {
-    await this.findOne(id);
+  async update(id: string, dto: UpdateRoomDto, actorUserId?: string) {
+    const existing = await this.findOne(id);
     // Manual status edits from staff (e.g. flipping to MAINTENANCE) go through
     // untouched here — syncRoomStatus() respects MAINTENANCE and won't override it.
-    return this.prisma.room.update({ where: { id }, data: dto });
+    const room = await this.prisma.room.update({ where: { id }, data: dto });
+
+    await this.auditLog.create({
+      userId: actorUserId,
+      hotelId: room.hotelId,
+      action: AuditAction.UPDATE,
+      entity: 'Room',
+      entityId: room.id,
+      oldValues: {
+        status: existing.status,
+        pricePerNight: Number(existing.pricePerNight),
+        roomType: existing.roomType,
+      },
+      newValues: {
+        status: room.status,
+        pricePerNight: Number(room.pricePerNight),
+        roomType: room.roomType,
+      },
+    }).catch(() => {});
+
+    return room;
   }
 
-  async delete(id: string) {
+  async delete(id: string, actorUserId?: string) {
     const room = await this.findOne(id);
 
     if (room.images?.length) {
@@ -86,7 +127,18 @@ export class RoomService {
       );
     }
 
-    return this.prisma.room.delete({ where: { id } });
+    const deleted = await this.prisma.room.delete({ where: { id } });
+
+    await this.auditLog.create({
+      userId: actorUserId,
+      hotelId: room.hotelId,
+      action: AuditAction.DELETE,
+      entity: 'Room',
+      entityId: id,
+      oldValues: { roomNumber: room.roomNumber, roomType: room.roomType },
+    }).catch(() => {});
+
+    return deleted;
   }
 
   // ── Images ────────────────────────────────────────────────────────────────
@@ -135,8 +187,6 @@ export class RoomService {
   }
 
   // ── Booked date ranges (drives frontend date-picker disabling) ─────────────
-  // A room can be generally "available" while still having specific date
-  // ranges locked by other guests' confirmed bookings or active payment holds.
 
   async getBookedDateRanges(roomId: string) {
     const bookings = await this.prisma.booking.findMany({
@@ -159,16 +209,11 @@ export class RoomService {
   }
 
   // ── Room.status sync (single source of truth) ───────────────────────────────
-  // Call this after ANY booking status change instead of hardcoding
-  // AVAILABLE/OCCUPIED directly. Computes truth from bookings covering *today*,
-  // so it's correct even when a room has multiple overlapping-in-time bookings
-  // (e.g. an active stay + an unrelated future reservation being cancelled).
 
   async syncRoomStatus(roomId: string) {
     const room = await this.prisma.room.findUnique({ where: { id: roomId } });
     if (!room) return;
 
-    // MAINTENANCE is a manual staff decision — never auto-override it.
     if (room.status === RoomStatus.MAINTENANCE) return;
 
     const now = new Date();

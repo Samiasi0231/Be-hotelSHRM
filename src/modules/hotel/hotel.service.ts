@@ -5,14 +5,14 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
-  ConflictException,
+ BadRequestException
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateHotelDto, UpdatePoliciesDto } from './dto/create-hotel.dto';
 import { UpdateHotelDto } from './dto/update-hotel.dto';
 import { OnboardingStepDto } from './dto/onboarding.dto';
 import { paginate, getPaginationParams } from '../../common/helpers/pagination.helper';
-import { Role } from '@prisma/client';
+import { Role,SubscriptionStatus } from '@prisma/client';
 import { CloudinaryService } from '@/cloudinary/cloudinary.service';
 
 @Injectable()
@@ -34,6 +34,9 @@ export class HotelService {
       .substring(0, 60);               // max 60 chars
   }
 
+
+  
+
   private async ensureUniqueSlug(base: string, excludeId?: string): Promise<string> {
     let slug = base;
     let count = 0;
@@ -46,6 +49,30 @@ export class HotelService {
     return slug;
   }
 
+
+
+
+  private async getPubliclyAvailableHotel(slug: string) {
+  const hotel = await this.prisma.hotel.findUnique({
+    where: { slug },
+  });
+
+  if (!hotel) {
+    throw new NotFoundException('Hotel not found');
+  }
+
+  if (
+    !hotel.isActive ||
+    !hotel.isOnboarded ||
+    hotel.subscriptionStatus !== 'ACTIVE' ||
+    (hotel.subscriptionExpiry &&
+      hotel.subscriptionExpiry <= new Date())
+  ) {
+    throw new NotFoundException('Hotel not found');
+  }
+
+  return hotel;
+}
   // ─── Core CRUD ────────────────────────────────────────────────────────────
 
   async create(dto: CreateHotelDto, directorId: string) {
@@ -56,7 +83,9 @@ export class HotelService {
     const slug = await this.ensureUniqueSlug(baseSlug);
 
     return this.prisma.hotel.create({
-      data: { ...dto, directorId, slug, onboardingStep: 1, isOnboarded: false },
+      data: { ...dto, directorId, slug, onboardingStep: 1, isOnboarded: false,isActive: false,
+    subscriptionStatus: SubscriptionStatus.INACTIVE,
+       },
       include: {
         director: { select: { id: true, firstName: true, lastName: true, email: true } },
       },
@@ -102,23 +131,7 @@ export class HotelService {
     return hotel;
   }
 
-  // async findBySlug(slug: string) {
-  //   const hotel = await this.prisma.hotel.findUnique({
-  //     where: { slug },
-  //     include: {
-  //       rooms: {
-  //         where: { isActive: true, status: 'AVAILABLE' },
-  //         orderBy: { pricePerNight: 'asc' },
-  //       },
-  //       _count: { select: { rooms: true } },
-  //     },
-  //   });
-  //   if (!hotel) throw new NotFoundException('Hotel not found');
-  //   return hotel;
-  // }
-
-
-  // In hotel.service.ts — ADD this method, keep findByDirector for other callers
+ 
 
 async findByUser(userId: string, role: string) {
   // HOTEL_DIRECTOR → hotel is linked via directorId
@@ -145,13 +158,13 @@ async findByUser(userId: string, role: string) {
 
 
   // Only findBySlug changes — include full room data with images
- 
 async findBySlug(slug: string) {
+  await this.getPubliclyAvailableHotel(slug);
   const hotel = await this.prisma.hotel.findUnique({
     where: { slug },
     include: {
       rooms: {
-        where: { isActive: true },          // show all active rooms, not just AVAILABLE
+        where: { isActive: true },
         orderBy: { pricePerNight: 'asc' },
         select: {
           id: true,
@@ -163,46 +176,75 @@ async findBySlug(slug: string) {
           floor: true,
           status: true,
           amenities: true,
-          images: true,                      
+          images: true,
         },
       },
       _count: { select: { rooms: true } },
     },
   });
-  if (!hotel) throw new NotFoundException('Hotel not found');
+  if (!hotel) {
+    throw new NotFoundException('Hotel not found');
+  }
   return hotel;
 }
  
 // ALSO add this new method for availability check (used by booking widget):
-async getAvailableRooms(slug: string, checkIn: string, checkOut: string) {
-  const hotel = await this.prisma.hotel.findUnique({ where: { slug } });
-  if (!hotel) throw new NotFoundException('Hotel not found');
- 
+
+async getAvailableRooms(
+  slug: string,
+  checkIn: string,
+  checkOut: string,
+) {
+  const hotel = await this.getPubliclyAvailableHotel(slug);
+
   const checkInDate = new Date(checkIn);
   const checkOutDate = new Date(checkOut);
- 
-  // Get rooms that have NO conflicting booking in the selected range
-  const bookedRoomIds = await this.prisma.booking.findMany({
+
+  // Validate the dates.
+  if (
+    Number.isNaN(checkInDate.getTime()) ||
+    Number.isNaN(checkOutDate.getTime()) ||
+    checkInDate >= checkOutDate
+  ) {
+    throw new BadRequestException('Invalid check-in or check-out dates');
+  }
+
+  // Find bookings that genuinely block these dates.
+  const conflictingBookings = await this.prisma.booking.findMany({
     where: {
       hotelId: hotel.id,
-      status: { in: ['CONFIRMED', 'CHECKED_IN', 'PENDING'] },
-      OR: [{ checkIn: { lte: checkOutDate }, checkOut: { gte: checkInDate } }],
+      checkIn: { lt: checkOutDate },
+      checkOut: { gt: checkInDate },
+      OR: [
+        {
+          status: {
+            in: ['CONFIRMED', 'CHECKED_IN'],
+          },
+        },
+        {
+          status: 'PENDING',
+          timeoutAt: { gt: new Date() },
+        },
+      ],
     },
     select: { roomId: true },
   });
- 
-  const bookedIds = bookedRoomIds.map((b) => b.roomId);
- 
+
+  const bookedIds = conflictingBookings.map(
+    (booking) => booking.roomId,
+  );
+
+  // Return active rooms that have no conflicting bookings.
   return this.prisma.room.findMany({
     where: {
       hotelId: hotel.id,
       isActive: true,
-      status: 'AVAILABLE',
       id: { notIn: bookedIds },
     },
     orderBy: { pricePerNight: 'asc' },
   });
 }
+
 
   async findByDirector(directorId: string) {
     return this.prisma.hotel.findUnique({
@@ -226,11 +268,6 @@ async getAvailableRooms(slug: string, checkIn: string, checkOut: string) {
 
     return this.prisma.hotel.update({ where: { id }, data: { ...dto, ...slugUpdate } });
   }
-
-  // async updateLogo(id: string, logoPath: string) {
-  //   return this.prisma.hotel.update({ where: { id }, data: { logo: logoPath } });
-  // }
-
 
     async updateLogo(hotelId: string, file: Express.Multer.File) {
     // Upload to Cloudinary under hotels/logos folder

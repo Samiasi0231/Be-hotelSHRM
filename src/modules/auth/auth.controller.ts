@@ -4,7 +4,7 @@
 
 import {
   Controller, Post, Get, Put, Patch, Body,
-  UseGuards, UseInterceptors, UploadedFile,
+  UseGuards, UseInterceptors, UploadedFile, HttpCode
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
@@ -19,7 +19,9 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CloudinaryService } from '../../cloudinary/cloudinary.service';
 import { PrismaService } from '../../prisma/prisma.service';
-
+import { Public } from '../../common/decorators/public.decorators';
+import { ForgotPasswordDto } from './dto/forgot-passsword';
+import { ResetPasswordDto, ValidateResetTokenDto } from './dto/reset-password';
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
@@ -41,17 +43,52 @@ export class AuthController {
     return this.authService.login(dto);
   }
 
+    // @Public() is redundant today (no global guard) but keeps these open if you ever add one.
+
+  // @Post('forgot-password')
+  // @Public()
+  // @HttpCode(200)
+  // @ApiOperation({ summary: 'Request a password reset email (always returns the same response)' })
+  // forgotPassword(@Body() dto: ForgotPasswordDto) {
+  //   return this.authService.requestPasswordReset(dto.email);
+  // }
+
+
+
+  @Post('forgot-password')
+@Public()
+@HttpCode(200)
+forgotPassword(@Body() dto: ForgotPasswordDto) {
+  return this.authService.requestPasswordReset(dto.email);
+}
+
+  @Post('reset-password/validate')
+  @Public()
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Check whether a reset link is still usable' })
+  validateResetToken(@Body() dto: ValidateResetTokenDto) {
+    return this.authService.validateResetToken(dto.token);
+  }
+
+  @Post('reset-password')
+  @Public()
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Set a new password using a reset token' })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
+  }
+
   @Post('super-admin/login')
   @ApiOperation({ summary: 'Super Admin login — SUPER_ADMIN role only' })
   loginSuperAdmin(@Body() dto: SuperAdminLoginDto) {
     return this.authService.loginSuperAdmin(dto)
   }
 
-  @Post('refresh')
-  @ApiOperation({ summary: 'Refresh access token using refresh token' })
-  refresh(@Body() dto: RefreshTokenDto) {
-    return this.authService.refreshTokens(dto.userId, dto.refreshToken);
-  }
+ @Post('refresh')
+@ApiOperation({ summary: 'Refresh access token using refresh token' })
+refresh(@Body() dto: RefreshTokenDto) {
+  return this.authService.refreshTokens(dto);
+}
 
   @Post('logout')
   @UseGuards(JwtAuthGuard)

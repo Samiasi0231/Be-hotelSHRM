@@ -1,7 +1,7 @@
 // src/modules/hotel/public-hotel.controller.ts — FULL REPLACEMENT
 // All routes here are unauthenticated
 
-import { Controller, Get, Post, Param, Query, Body } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Body ,BadRequestException} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { HotelService } from './hotel.service';
 import { BookingService } from '../booking/booking.service';
@@ -35,21 +35,45 @@ export class PublicHotelController {
     return this.hotelService.getAvailableRooms(slug, checkIn, checkOut);
   }
 
-  @Post(':slug/book')
-  @ApiOperation({ summary: 'Create booking (no auth) — returns booking + Paystack access code' })
-  async createBooking(
-    @Param('slug') slug: string,
-    @Body() dto: CreateBookingDto,
-  ) {
-    // 1. Create the booking
-    const booking = await this.bookingService.create(dto);
+ 
+@Post(':slug/book')
+@ApiOperation({
+  summary: 'Create booking (no auth) — returns booking + Paystack access code',
+})
+async createBooking(
+  @Param('slug') slug: string,
+  @Body() dto: CreateBookingDto,
+) {
+  // 1. Find the hotel by slug.
+  // findBySlug() must enforce the public availability checks.
+  const hotel = await this.hotelService.findBySlug(slug);
 
-    // 2. Initialize Paystack payment inline
-    const payment = await this.paymentService.initiatePaystack({
-      bookingId: booking.id,
-    });
-
-    // Return both so frontend can open the Paystack popup immediately
-    return { booking, payment };
+  // 2. Ensure the submitted hotel ID matches the URL.
+  if (dto.hotelId !== hotel.id) {
+    throw new BadRequestException(
+      'The hotel ID does not match the requested hotel',
+    );
   }
+
+  // 3. Ensure the requested room belongs to this hotel.
+  const roomBelongsToHotel = hotel.rooms.some(
+    (room) => room.id === dto.roomId,
+  );
+
+  if (!roomBelongsToHotel) {
+    throw new BadRequestException(
+      'The selected room does not belong to this hotel',
+    );
+  }
+
+  // 4. Create the booking only after validation.
+  const booking = await this.bookingService.create(dto);
+
+  // 5. Initiate payment only after booking creation succeeds.
+  const payment = await this.paymentService.initiatePaystack({
+    bookingId: booking.id,
+  });
+
+  return { booking, payment };
+}
 }

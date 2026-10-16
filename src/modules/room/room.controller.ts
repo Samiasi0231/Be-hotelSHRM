@@ -28,6 +28,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { CurrentUser } from '@/common/decorators/current-user.decorator';
 
 @ApiTags('Rooms')
 @ApiBearerAuth('JWT-auth')
@@ -38,12 +39,16 @@ export class RoomController {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  @Post()
-  @Roles(Role.HOTEL_DIRECTOR, Role.ADMIN, Role.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Create room' })
-  create(@Param('hotelId') hotelId: string, @Body() dto: CreateRoomDto) {
-    return this.roomService.create(hotelId, dto);
-  }
+ @Post()
+@Roles(Role.HOTEL_DIRECTOR, Role.ADMIN, Role.SUPER_ADMIN)
+create(
+  @Param('hotelId') hotelId: string,
+  @Body() dto: CreateRoomDto,
+  @CurrentUser('sub') userId: string,
+) {
+  return this.roomService.create(hotelId, dto, userId);
+}
+  
 
   @Get()
   @ApiOperation({ summary: 'Get all rooms for hotel' })
@@ -78,19 +83,24 @@ export class RoomController {
     return this.roomService.getBookedDateRanges(id);
   }
 
-  @Put(':id')
-  @Roles(Role.HOTEL_DIRECTOR, Role.ADMIN, Role.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Update room' })
-  update(@Param('id') id: string, @Body() dto: UpdateRoomDto) {
-    return this.roomService.update(id, dto);
-  }
+ @Put(':id')
+@Roles(Role.HOTEL_DIRECTOR, Role.ADMIN, Role.SUPER_ADMIN)
+update(
+  @Param('id') id: string,
+  @Body() dto: UpdateRoomDto,
+  @CurrentUser('sub') userId: string,
+) {
+  return this.roomService.update(id, dto, userId);
+}
 
-  @Delete(':id')
-  @Roles(Role.HOTEL_DIRECTOR, Role.SUPER_ADMIN)
-  @ApiOperation({ summary: 'Delete room' })
-  delete(@Param('id') id: string) {
-    return this.roomService.delete(id);
-  }
+ @Delete(':id')
+@Roles(Role.HOTEL_DIRECTOR, Role.SUPER_ADMIN)
+delete(
+  @Param('id') id: string,
+  @CurrentUser('sub') userId: string,
+) {
+  return this.roomService.delete(id, userId);
+}
 
   // ── Images ────────────────────────────────────────────────────────────────
 

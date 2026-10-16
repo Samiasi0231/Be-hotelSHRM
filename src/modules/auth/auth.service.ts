@@ -3,7 +3,7 @@ import {
   UnauthorizedException,
   ConflictException,
   NotFoundException,
-  BadRequestException,
+  BadRequestException,ForbiddenException 
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -14,15 +14,25 @@ import { LoginDto } from './dto/login.dto';
 import {SuperAdminLoginDto} from './dto/supera-admin-login.dto'
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { UpdateProfileDto, ChangePasswordDto } from './dto/update-profile.dto';
-import { ForbiddenException } from '@nestjs/common' 
 import { Role } from '@prisma/client';
+import { Logger } from '@nestjs/common';
+import { createHash, randomBytes } from 'crypto';
+import { EmailService } from '../email/email.service';
+import { ResetPasswordDto } from './dto/reset-password';
 
-@Injectable()
+const RESET_TTL_MS = 60 * 60 * 1000;   
+const RESET_COOLDOWN_MS = 60 * 1000;      
+const INVALID_RESET = 'This reset link is invalid or has expired. Please request a new one.';
+
+  @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private prisma: PrismaService,
     private jwtService: JwtService,
     private config: ConfigService,
+    private email: EmailService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -61,6 +71,98 @@ export class AuthService {
     return { user: safe, ...tokens };
   }
 
+  // ── Password reset ─────────────────────────────────────────────────────────
+
+  private hashToken(token: string) {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  async requestPasswordReset(rawEmail: string) {
+    // Identical response whether or not the account exists — no email enumeration.
+    const generic = { message: 'If an account exists for that email, a reset link has been sent.' };
+
+    const user = await this.prisma.user.findFirst({
+      where: { email: { equals: rawEmail.trim(), mode: 'insensitive' } },
+      select: { id: true, email: true, firstName: true, isActive: true },
+    });
+    if (!user || !user.isActive) return generic;
+
+    // Cooldown: stops someone using this endpoint to flood a victim's inbox.
+    const recent = await this.prisma.passwordResetToken.findFirst({
+      where: { userId: user.id, createdAt: { gt: new Date(Date.now() - RESET_COOLDOWN_MS) } },
+      select: { id: true },
+    });
+    if (recent) return generic;
+
+    const token = randomBytes(32).toString('hex');
+
+    // One live link per account: issuing a new one revokes any earlier ones.
+    await this.prisma.$transaction([
+      this.prisma.passwordResetToken.deleteMany({ where: { userId: user.id } }),
+      this.prisma.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: this.hashToken(token),
+          expiresAt: new Date(Date.now() + RESET_TTL_MS),
+        },
+      }),
+    ]);
+
+    const frontendUrl = this.config.get('FRONTEND_URL', 'http://localhost:5173');
+    const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
+
+    // Dev convenience so you can test without SMTP. Never runs unless NODE_ENV is exactly "development".
+    if (this.config.get('NODE_ENV') === 'development') {
+      this.logger.debug(`[DEV ONLY] password reset link for ${user.email}: ${resetUrl}`);
+    }
+
+    // Not awaited, so response time doesn't reveal whether the account exists.
+    void this.email.sendPasswordResetEmail(user.email, user.firstName, resetUrl);
+
+    return generic;
+  }
+
+  async validateResetToken(token: string) {
+    const record = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash: this.hashToken(token) },
+      select: { usedAt: true, expiresAt: true },
+    });
+    return { valid: !!record && !record.usedAt && record.expiresAt > new Date() };
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    const record = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash: this.hashToken(dto.token) },
+      include: { user: { select: { id: true, email: true, firstName: true, isActive: true } } },
+    });
+
+    if (!record || record.usedAt || record.expiresAt < new Date() || !record.user.isActive) {
+      throw new BadRequestException(INVALID_RESET);
+    }
+
+    // Claim the token atomically — a double-submit or a replay finds nothing to claim.
+    const claimed = await this.prisma.passwordResetToken.updateMany({
+      where: { id: record.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    if (claimed.count === 0) throw new BadRequestException(INVALID_RESET);
+
+    const hashed = await bcrypt.hash(dto.newPassword, 12);
+
+    await this.prisma.$transaction([
+      // refreshToken: null signs the user out of every device (access tokens die within JWT_EXPIRES_IN).
+      this.prisma.user.update({
+        where: { id: record.userId },
+        data: { password: hashed, refreshToken: null },
+      }),
+      this.prisma.passwordResetToken.deleteMany({ where: { userId: record.userId } }),
+    ]);
+
+    void this.email.sendPasswordChangedEmail(record.user.email, record.user.firstName);
+
+    return { message: 'Password reset successfully. You can now sign in.' };
+  }
+
   async loginSuperAdmin(dto: SuperAdminLoginDto) {
     const user = await this.prisma.user.findUnique({ where: { email: dto.email } })
  
@@ -87,17 +189,37 @@ export class AuthService {
     return { user: safe, ...tokens }
   }
 
-  async refreshTokens(userId: string, refreshToken: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.refreshToken) throw new UnauthorizedException('Access denied');
+   
+async refreshTokens(dto: RefreshTokenDto) {
+  const { userId, refreshToken } = dto;
 
-    const tokenMatch = await bcrypt.compare(refreshToken, user.refreshToken);
-    if (!tokenMatch) throw new UnauthorizedException('Access denied');
+  const user = await this.prisma.user.findUnique({
+    where: { id: userId },
+  });
 
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
-    await this.updateRefreshToken(user.id, tokens.refreshToken);
-    return tokens;
+  if (!user || !user.refreshToken) {
+    throw new UnauthorizedException('Access denied');
   }
+
+  const tokenMatch = await bcrypt.compare(
+    refreshToken,
+    user.refreshToken,
+  );
+
+  if (!tokenMatch) {
+    throw new UnauthorizedException('Access denied');
+  }
+
+  const tokens = await this.generateTokens(
+    user.id,
+    user.email,
+    user.role,
+  );
+
+  await this.updateRefreshToken(user.id, tokens.refreshToken);
+
+  return tokens;
+}
 
   async logout(userId: string) {
     await this.prisma.user.update({ where: { id: userId }, data: { refreshToken: null } });

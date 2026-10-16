@@ -16,7 +16,7 @@ import { RoomService } from '@/modules/room/room.service';
 import { ConfigService } from '@nestjs/config';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { paginate, getPaginationParams } from '../../common/helpers/pagination.helper';
-import { BookingStatus, PaymentStatus, AuditAction } from '@prisma/client';
+import { BookingStatus, PaymentStatus, AuditAction, SubscriptionStatus,} from '@prisma/client';
 
 export interface StaffActor {
   userId: string;
@@ -142,11 +142,50 @@ export class BookingService {
       (checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24),
     );
 
-    const room = await this.prisma.room.findUnique({
-      where:   { id: dto.roomId },
-      include: { hotel: { include: { director: { select: { email: true } } } } },
-    });
-    if (!room) throw new NotFoundException('Room not found');
+   
+const room = await this.prisma.room.findUnique({
+  where: { id: dto.roomId },
+  include: {
+    hotel: {
+      include: {
+        director: {
+          select: { email: true },
+        },
+      },
+    },
+  },
+});
+
+if (!room) {
+  throw new NotFoundException('Room not found');
+}
+
+// Make sure the submitted hotel owns this room.
+if (room.hotelId !== dto.hotelId) {
+  throw new BadRequestException(
+    'The selected room does not belong to this hotel',
+  );
+}
+
+const hotel = room.hotel;
+
+// Only approved, active hotels with valid subscriptions
+// can accept bookings.
+if (
+  !hotel.isActive ||
+  !hotel.isOnboarded ||
+  hotel.subscriptionStatus !== SubscriptionStatus.ACTIVE ||
+  (hotel.subscriptionExpiry &&
+    hotel.subscriptionExpiry <= new Date())
+) {
+  throw new NotFoundException('Hotel not found');
+}
+
+if (!room.isActive || room.status !== 'AVAILABLE') {
+  throw new BadRequestException(
+    'This room is not available for booking',
+  );
+}
 
     const totalAmount = Number(room.pricePerNight) * nights;
     const bookingRef  = `BK${Date.now().toString(36).toUpperCase()}`;
@@ -155,8 +194,8 @@ export class BookingService {
     const booking = await this.prisma.booking.create({
       data: {
         bookingRef,
-        hotelId:        dto.hotelId,
-        roomId:         dto.roomId,
+         hotelId: room.hotelId,
+          roomId: room.id,
         guestId:        dto.guestId,
         guestName:      dto.guestName,
         guestEmail:     dto.guestEmail,
