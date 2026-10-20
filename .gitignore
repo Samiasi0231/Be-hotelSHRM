@@ -21,7 +21,9 @@ uploads/*
 !uploads/.gitkeep
 
 # Prisma
-prisma/migrations/
+# Keep database migrations in Git
+!prisma/migrations/
+!prisma/migrations/**/ 
 
 # IDE
 .vscode/
